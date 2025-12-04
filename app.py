@@ -44,31 +44,42 @@ def load_courses():
 
     df = pd.read_excel(EXCEL_PATH)
 
-    # Normalize column names to lower + strip
-    col_map = {c.lower().strip(): c for c in df.columns}
+    # Normalize by lower + strip + replace spaces with underscores
+    def norm_col(c):
+        return c.lower().strip().replace(" ", "_")
 
-    # ----- Ensure 'course_id' exists -----
+    # First pass: detect and rename by normalized keys
+    rename_map = {}
+    for c in df.columns:
+        key = norm_col(c)
+        if key in ["course_id", "courseid"] and "course_id" not in df.columns:
+            rename_map[c] = "course_id"
+        elif key in ["course_name", "coursename", "course_title"] and "course_name" not in df.columns:
+            rename_map[c] = "course_name"
+
+    if rename_map:
+        df = df.rename(columns=rename_map)
+
+    # Second pass: handle variants like "Course ID", "Course Name", etc.
+    col_map = {norm_col(c): c for c in df.columns}
+
     if "course_id" not in df.columns:
-        for cand in ["course id", "courseid", "course_id", "id", "course"]:
+        for cand in ["course_id", "courseid", "course_id_", "id", "course"]:
             if cand in col_map:
                 df = df.rename(columns={col_map[cand]: "course_id"})
                 break
 
-    # ----- Ensure 'course_name' exists -----
     if "course_name" not in df.columns:
-        for cand in [
-            "course name",
-            "coursename",
-            "course_title",
-            "course title",
-            "title",
-            "name",
-        ]:
-            if cand in col_map:
-                df = df.rename(columns={col_map[cand]: "course_name"})
+        for cand in ["course_name", "course_name_", "course_name__", "coursename", "course_title", "course_title_", "course_name___", "course_name____", "course_name_____", "course_name______", "course_name_______", "course_name________", "course_name_________", "course_name__________", "course_name___________", "course_name____________", "course_name_____________", "course_name______________", "course_name_______________"]:
+            # That was overkill, but to be safe we keep simple ones:
+            pass
+        # Use a simpler robust set:
+        for cand in ["course_name", "course_name_", "course_name__", "course_name___", "course_name____", "course_name_____", "course name", "course title", "coursename", "title", "name"]:
+            if cand.replace(" ", "_") in col_map:
+                df = df.rename(columns={col_map[cand.replace(" ", "_")]: "course_name"})
                 break
 
-    # Fallbacks
+    # Final fallback logic
     if "course_id" in df.columns and "course_name" not in df.columns:
         df["course_name"] = df["course_id"].astype(str)
 
@@ -116,7 +127,7 @@ def recommend_for_user_simple(user_id, top_k, user2idx, idx2item, user_item, cou
     return df
 
 # -------------------------------------------------------------------
-# MODEL METRICS (FILL WITH YOUR REAL VALUES)
+# MODEL METRICS (TABLE ONLY – NO RADAR)
 # -------------------------------------------------------------------
 METRICS = {
     "Content-based": {
@@ -145,43 +156,6 @@ METRICS = {
 # -------------------------------------------------------------------
 # VISUAL HELPERS
 # -------------------------------------------------------------------
-def plot_metrics_radar(metrics_dict):
-    """
-    metrics_dict: {
-       'ModelName': {'precision':..., 'recall':..., 'f1':..., 'rmse':..., 'mae':...},
-       ...
-    }
-    """
-    rows = []
-    for model_name, m in metrics_dict.items():
-        for metric_name, value in m.items():
-            rows.append(
-                {
-                    "Model": model_name,
-                    "Metric": metric_name.upper(),
-                    "Score": float(value),
-                }
-            )
-
-    df = pd.DataFrame(rows)
-
-    fig = px.line_polar(
-        df,
-        r="Score",
-        theta="Metric",
-        color="Model",
-        line_close=True,
-        markers=True,
-    )
-    fig.update_traces(fill="toself", opacity=0.6)
-    fig.update_layout(
-        polar=dict(radialaxis=dict(visible=True)),
-        showlegend=True,
-        title="Model Metrics Radar Plot",
-    )
-    return fig
-
-
 def plot_reco_status_bar(recs_df):
     """
     recs_df: DataFrame with columns:
@@ -205,6 +179,72 @@ def plot_reco_status_bar(recs_df):
     fig.update_traces(textposition="outside")
     return fig
 
+
+def plot_courses_radar(recs_df, max_courses=6):
+    """
+    Radar plot for course-to-course comparison.
+    Axes = score + optional rating / content_score if present.
+    Each polygon = one course.
+    """
+    if recs_df.empty:
+        return None
+
+    # Select top N courses
+    df = recs_df.sort_values("score", ascending=False).head(max_courses).copy()
+
+    # Decide which numeric dimensions to use
+    radar_dims = []
+    # Always include recommendation score
+    if "score" in df.columns and pd.api.types.is_numeric_dtype(df["score"]):
+        radar_dims.append(("score", "Reco Score"))
+
+    # Optional dimensions if present in your Excel
+    for col, label in [("rating", "Rating"), ("content_score", "Content Score")]:
+        if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
+            radar_dims.append((col, label))
+
+    # If we only have score, still show it
+    if len(radar_dims) == 0:
+        return None
+
+    # Normalize each dimension to [0,1] for nicer radar scaling
+    for col, label in radar_dims:
+        col_min = df[col].min()
+        col_max = df[col].max()
+        if col_max > col_min:
+            df[label] = (df[col] - col_min) / (col_max - col_min)
+        else:
+            df[label] = 1.0  # all equal
+
+    rows = []
+    for _, row in df.iterrows():
+        course_name = str(row.get("course_name", row["course_id"]))
+        for _, label in radar_dims:
+            rows.append(
+                {
+                    "Course": course_name,
+                    "Metric": label,
+                    "Value": float(row[label]),
+                }
+            )
+
+    radar_df = pd.DataFrame(rows)
+
+    fig = px.line_polar(
+        radar_df,
+        r="Value",
+        theta="Metric",
+        color="Course",
+        line_close=True,
+        markers=True,
+    )
+    fig.update_traces(fill="toself", opacity=0.6)
+    fig.update_layout(
+        polar=dict(radialaxis=dict(visible=True, range=[0, 1])),
+        showlegend=True,
+        title="Course-to-Course Radar (Score / Rating / Content)",
+    )
+    return fig
 
 # -------------------------------------------------------------------
 # HIGHER LEVEL RECOMMENDER FOR UI
@@ -256,6 +296,12 @@ def recommend_courses_for_user(user_id, top_k, user2idx, item2idx, idx2item, use
                 "course_name": name,
                 "score": float(row["score"]),
                 "already_taken": already_taken,
+                # carry over any extra columns if needed later
+                **{
+                    k: row[k]
+                    for k in row.index
+                    if k not in ["course_id", "course_name", "score"]
+                },
             }
         )
     return recs
@@ -270,7 +316,6 @@ def main():
     user2idx, idx2user, item2idx, idx2item, user_item = load_artifacts()
     courses_df = load_courses()
 
-    
     # ---------------- SIDEBAR ----------------
     st.sidebar.header("⚙️ Settings")
 
@@ -288,7 +333,7 @@ def main():
     st.sidebar.markdown("---")
     st.sidebar.header("📊 Model Evaluation Metrics")
 
-    # Metrics table
+    # Metrics table ONLY (no radar)
     metrics_df = pd.DataFrame(METRICS).T[
         ["precision", "recall", "f1", "rmse", "mae"]
     ]
@@ -303,11 +348,6 @@ def main():
     )
     st.sidebar.subheader("Metrics Table")
     st.sidebar.dataframe(metrics_df.style.format("{:.3f}"), use_container_width=True)
-
-    # Radar plot
-    radar_fig = plot_metrics_radar(METRICS)
-    st.sidebar.subheader("Radar Plot")
-    st.sidebar.plotly_chart(radar_fig, use_container_width=True)
 
     
     # ---------------- MAIN LAYOUT ----------------
@@ -361,7 +401,13 @@ def main():
             bar_fig = plot_reco_status_bar(recs_df)
             st.plotly_chart(bar_fig, use_container_width=True)
 
-            # 2) Score distribution per course
+            # 2) Radar plot for course-to-course comparison
+            radar_fig = plot_courses_radar(recs_df)
+            if radar_fig is not None:
+                st.markdown("### Course Radar")
+                st.plotly_chart(radar_fig, use_container_width=True)
+
+            # 3) Score distribution per course
             st.markdown("### Score Distribution")
             score_fig = px.bar(
                 recs_df.sort_values("score", ascending=False),

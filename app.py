@@ -38,17 +38,54 @@ def load_artifacts():
 
 @st.cache_resource
 def load_courses():
-    if EXCEL_PATH.exists():
-        return pd.read_excel(EXCEL_PATH)
-    return None
+    """Load Excel and normalize column names to have course_id and course_name."""
+    if not EXCEL_PATH.exists():
+        return None
+
+    df = pd.read_excel(EXCEL_PATH)
+
+    # Normalize column names to lower + strip
+    col_map = {c.lower().strip(): c for c in df.columns}
+
+    # ----- Ensure 'course_id' exists -----
+    if "course_id" not in df.columns:
+        for cand in ["course id", "courseid", "course_id", "id", "course"]:
+            if cand in col_map:
+                df = df.rename(columns={col_map[cand]: "course_id"})
+                break
+
+    # ----- Ensure 'course_name' exists -----
+    if "course_name" not in df.columns:
+        for cand in [
+            "course name",
+            "coursename",
+            "course_title",
+            "course title",
+            "title",
+            "name",
+        ]:
+            if cand in col_map:
+                df = df.rename(columns={col_map[cand]: "course_name"})
+                break
+
+    # Fallbacks
+    if "course_id" in df.columns and "course_name" not in df.columns:
+        df["course_name"] = df["course_id"].astype(str)
+
+    if "course_name" in df.columns:
+        df["course_name"] = df["course_name"].fillna(
+            df.get("course_id", "").astype(str)
+        )
+
+    return df
 
 # -------------------------------------------------------------------
-# BASELINE RECOMMENDER (your existing simple logic)
+# BASELINE RECOMMENDER (popularity-based)
 # -------------------------------------------------------------------
 def recommend_for_user_simple(user_id, top_k, user2idx, idx2item, user_item, courses_df=None):
     user_id = str(user_id)
     if user_id not in user2idx:
-        return pd.DataFrame(columns=["course_id", "score"])
+        return pd.DataFrame(columns=["course_id", "score", "course_name"])
 
     uidx = user2idx[user_id]
 
@@ -66,8 +103,16 @@ def recommend_for_user_simple(user_id, top_k, user2idx, idx2item, user_item, cou
     top_scores = popularity[top_idx]
 
     df = pd.DataFrame({"course_id": top_items, "score": top_scores})
+
     if courses_df is not None and "course_id" in courses_df.columns:
         df = df.merge(courses_df, on="course_id", how="left")
+
+    # Ensure course_name is always present
+    if "course_name" not in df.columns:
+        df["course_name"] = df["course_id"].astype(str)
+    else:
+        df["course_name"] = df["course_name"].fillna(df["course_id"].astype(str))
+
     return df
 
 # -------------------------------------------------------------------
@@ -160,12 +205,13 @@ def plot_reco_status_bar(recs_df):
     fig.update_traces(textposition="outside")
     return fig
 
+
 # -------------------------------------------------------------------
 # HIGHER LEVEL RECOMMENDER FOR UI
 # -------------------------------------------------------------------
 def recommend_courses_for_user(user_id, top_k, user2idx, item2idx, idx2item, user_item, courses_df):
     """
-    Wraps your simple recommender and adds:
+    Wraps simple recommender and adds:
       - course_name
       - already_taken flag
     Returns list of dicts for the UI.
@@ -189,6 +235,7 @@ def recommend_courses_for_user(user_id, top_k, user2idx, item2idx, idx2item, use
     recs = []
     for _, row in recs_df.iterrows():
         course_id = row["course_id"]
+
         # map course_id back to internal index (if possible)
         internal_idx = None
         if item2idx is not None:
@@ -198,10 +245,15 @@ def recommend_courses_for_user(user_id, top_k, user2idx, item2idx, idx2item, use
         if internal_idx is not None:
             already_taken = internal_idx in interacted_idx
 
+        # strong fallback for name
+        name = str(row.get("course_name", course_id))
+        if pd.isna(name) or name.strip() == "":
+            name = str(course_id)
+
         recs.append(
             {
                 "course_id": course_id,
-                "course_name": row.get("course_name", course_id),
+                "course_name": name,
                 "score": float(row["score"]),
                 "already_taken": already_taken,
             }
@@ -218,6 +270,7 @@ def main():
     user2idx, idx2user, item2idx, idx2item, user_item = load_artifacts()
     courses_df = load_courses()
 
+    
     # ---------------- SIDEBAR ----------------
     st.sidebar.header("⚙️ Settings")
 
